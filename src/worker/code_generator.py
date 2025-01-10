@@ -8,9 +8,11 @@ import re
 import asyncio
 import logging
 from datetime import datetime
+import shutil
 
 from ..llm.providers.base_provider import BaseProvider
 from ..utils.logger import get_logger
+from .analyzer.base_analyzer import BaseAnalysisResult
 from .analyzer.typescript import TypeScriptAnalyzer
 
 logger = get_logger(__name__)
@@ -274,7 +276,7 @@ class CodeGenerator:
             log_content.append("\nStructure Response:")
             log_content.append(structure_response)
 
-            # Parse and create files
+            # Parse and create files - do this only once
             files = self._parse_file_content(structure_response)
             log_content.append("\nParsed Files:")
             for path, content in files:
@@ -289,30 +291,34 @@ class CodeGenerator:
             # Create output directory if it doesn't exist
             context.output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Generate and write all files
-            structure_files = await self._create_project_structure(context)
-            for filepath, content in structure_files:
+            # Write all files at once - remove the separate generation steps
+            for filepath, content in files:
                 await self._write_file(context.output_dir / filepath, content)
 
-            core_files = await self._generate_core_files(context)
-            for filepath, content in core_files:
-                await self._write_file(context.output_dir / filepath, content)
-
-            if context.features:
-                feature_files = await self._implement_features(context)
-                for filepath, content in feature_files:
-                    await self._write_file(context.output_dir / filepath, content)
-
-            test_files = await self._generate_tests(context)
-            for filepath, content in test_files:
-                await self._write_file(context.output_dir / filepath, content)
-
-            doc_files = await self._create_documentation(context)
-            for filepath, content in doc_files:
-                await self._write_file(context.output_dir / filepath, content)
-
-            # Add analysis and fix step
-            await self._analyze_and_fix_code(context)
+            # Run analysis without modifying existing files
+            analysis_result = await self._analyze_code(context)
+            
+            # Only fix critical issues and create backups before modifying
+            if analysis_result and analysis_result.issues:
+                critical_issues = [
+                    issue for issue in analysis_result.issues
+                    if issue.get('severity') in ['high', 'critical']
+                ]
+                
+                if critical_issues:
+                    self.logger.info(f"Found {len(critical_issues)} critical issues to fix")
+                    
+                    # Create backups before fixing
+                    for file_path in set(issue.get('file') for issue in critical_issues if issue.get('file')):
+                        full_path = context.output_dir / file_path
+                        if full_path.exists():
+                            backup_path = full_path.with_suffix(full_path.suffix + '.bak')
+                            self.logger.info(f"Creating backup: {backup_path}")
+                            import shutil
+                            shutil.copy2(full_path, backup_path)
+                    
+                    # Now apply fixes
+                    await self._fix_critical_issues(context, critical_issues)
 
             self.logger.info("Project generation completed successfully")
             return True
@@ -320,6 +326,61 @@ class CodeGenerator:
         except Exception as e:
             self.logger.error(f"Error during project generation: {e}")
             return False
+
+    async def _analyze_code(self, context: GenerationContext) -> Optional[BaseAnalysisResult]:
+        """Analyze code without modifying files"""
+        try:
+            # Create appropriate analyzer based on language
+            analyzer = None
+            
+            if context.language == "python":
+                from .analyzer.python import PythonAnalyzer
+                analyzer = PythonAnalyzer(self.llm)
+            elif context.language == "typescript":
+                from .analyzer.typescript import TypeScriptAnalyzer
+                analyzer = TypeScriptAnalyzer(self.llm)
+            elif context.language == "javascript":
+                from .analyzer.javascript import JavaScriptAnalyzer
+                analyzer = JavaScriptAnalyzer(self.llm)
+            elif context.language == "solidity":
+                from .analyzer.solidity import SolidityAnalyzer
+                analyzer = SolidityAnalyzer(self.llm)
+            elif context.language == "style":
+                from .analyzer.style import StyleAnalyzer
+                analyzer = StyleAnalyzer(self.llm)
+
+            if not analyzer:
+                self.logger.warning(f"No analyzer available for {context.language}")
+                return None
+
+            # Run analysis
+            self.logger.info(f"Analyzing generated {context.language} code...")
+            return await analyzer.analyze_project(context.output_dir)
+
+        except Exception as e:
+            self.logger.error(f"Error during code analysis: {e}")
+            return None
+
+    async def _fix_critical_issues(self, context: GenerationContext, issues: List[Dict]) -> None:
+        """Fix only critical issues with backups"""
+        try:
+            # Create appropriate analyzer
+            analyzer = None
+            if context.language == "python":
+                from .analyzer.python import PythonAnalyzer
+                analyzer = PythonAnalyzer(self.llm)
+            elif context.language == "typescript":
+                from .analyzer.typescript import TypeScriptAnalyzer
+                analyzer = TypeScriptAnalyzer(self.llm)
+            # ... add other language analyzers as needed
+
+            if analyzer:
+                await analyzer.fix_issues(context.output_dir, issues)
+            else:
+                self.logger.warning(f"No analyzer available to fix {context.language} issues")
+
+        except Exception as e:
+            self.logger.error(f"Error fixing critical issues: {e}")
 
     async def _create_project_structure(self, context: GenerationContext) -> List[Tuple[str, str]]:
         """Creates the basic project structure and essential files"""
@@ -359,95 +420,73 @@ class CodeGenerator:
         """Builds prompt for project structure generation"""
         features_str = ", ".join(context.features) if context.features else "basic setup"
 
+        # Add explicit directory structure guidance
+        directory_guidance = """
+        IMPORTANT Directory Structure Rules:
+        1. All imports should be relative to the project root
+        2. Do NOT include 'src' in import paths
+        3. For a Python project, structure should be:
+           project_root/
+           ├── core/
+           │   ├── __init__.py
+           │   └── app.py
+           ├── tests/
+           │   ├── __init__.py
+           │   └── test_*.py
+           └── main.py
+
+        Example correct imports:
+        - Use: from core.app import Calculator
+        - NOT: from src.core.app import Calculator
+        """
+
         # Define project-specific essential files and structure
         project_templates = {
+            "python-cli": f"""
+            Essential files to include:
+            1. core/
+               - __init__.py
+               - app.py          # Core functionality
+            2. tests/
+               - __init__.py
+               - test_app.py     # Unit tests
+            3. main.py          # Entry point
+            4. README.md        # Documentation
+
+            {directory_guidance}
+            """,
+
             "nextjs": """
-        Essential files to include:
-        1. package.json with all necessary dependencies
-        2. tsconfig.json for TypeScript configuration
-        3. next.config.js for Next.js configuration
-        4. pages/index.tsx as the main page
-        5. pages/_app.tsx for custom App component
-        6. styles/globals.css for global styles
-        7. README.md with setup instructions""",
+            Essential files to include:
+            1. pages/
+               - index.tsx
+               - _app.tsx
+            2. components/
+               - Layout.tsx
+            3. styles/
+               - globals.css
+            4. public/
+            5. package.json
+            6. tsconfig.json
+            7. README.md
 
-            "python-cli": """
-        Essential files to include:
-        1. src/
-           - __init__.py
-           - main.py          # Core application logic
-           - core/            # Core functionality
-              - __init__.py
-              - app.py        # Main application class/logic
-        2. README.md with setup instructions""",
-
-            "flask": """
-        Essential files to include:
-        1. requirements.txt with all dependencies
-        2. app.py or application factory
-        3. config.py for configuration management
-        4. templates/ directory for Jinja templates
-        5. static/ directory for assets
-        6. models/ directory for database models
-        7. routes/ directory for view functions
-        8. tests/ directory
-        9. README.md with setup instructions""",
-
-            "django": """
-        Essential files to include:
-        1. manage.py
-        2. requirements.txt
-        3. project/settings.py
-        4. project/urls.py
-        5. project/wsgi.py
-        6. apps/main/models.py
-        7. apps/main/views.py
-        8. apps/main/urls.py
-        9. templates/ directory
-        10. static/ directory
-        11. README.md with setup instructions""",
-
-            "smart-contract": """
-        Essential files to include:
-        1. contracts/ directory with Solidity files
-        2. package.json with development dependencies
-        3. hardhat.config.js/ts for network config
-        4. scripts/ directory for deployment
-        5. test/ directory for contract tests
-        6. .env.example for environment variables
-        7. README.md with setup instructions""",
-
-            "hardhat": """
-        Essential files to include:
-        1. package.json with Hardhat dependencies
-        2. hardhat.config.ts with network configuration
-        3. contracts/ directory for Solidity files
-        4. scripts/ directory for deployment
-        5. test/ directory for contract tests
-        6. tasks/ directory for custom tasks
-        7. .env.example for environment variables
-        8. README.md with setup instructions""",
-
-            "react": """
-        Essential files to include:
-        1. package.json with dependencies
-        2. tsconfig.json for TypeScript
-        3. src/App.tsx main component
-        4. src/index.tsx entry point
-        5. public/index.html
-        6. src/components/ directory
-        7. src/styles/ directory
-        8. README.md with setup instructions"""
+            IMPORTANT: All imports should be relative to the project root
+            Example: import { Layout } from 'components/Layout'
+            """,
+            # ... other project templates ...
         }
 
         # Get template for the project type or use a generic one
         structure_template = project_templates.get(context.project_type, """
-                Essential files to include:
-                1. Main source code directory
-                2. Configuration files
-                3. Test directory
-                4. Documentation files
-                5. README.md with setup instructions""")
+            Essential files to include:
+            1. Main source code directory
+            2. Configuration files
+            3. Test directory
+            4. Documentation files
+            5. README.md with setup instructions
+
+            IMPORTANT: All imports should be relative to the project root
+            """)
 
         return f"""Create a complete {context.project_type} project with the following features:
                 {features_str}
@@ -457,41 +496,21 @@ class CodeGenerator:
 
                 {structure_template}
 
-                For markdown files (like README.md), use this EXACT format:
-                FILE: path/to/file.md
-                ###CONTENT_START###
-                # Title
-
-                [Complete description focused on what this specific project does]
-
-                ## Prerequisites
-
-                [Only actual prerequisites for this project]
-
-                ## Installation & Setup
-
-                [Exact steps to get THIS project running, no generic pip instructions unless setup.py exists]
-
-                ## Usage
-
-                [Actual commands and examples for THIS project]
-
-                [Additional sections only if relevant to this specific project]
-
-                ###CONTENT_END###
-
-                For all files, strictly use this format:
+                For each file, strictly use this format:
                 FILE: path/to/file
                 ###CONTENT_START###
                 [Complete code content]
                 ###CONTENT_END###
 
-                IMPORTANT:
-                - Each file must start with FILE: marker
-                - Content must be between ###CONTENT_START### and ###CONTENT_END### markers
-                - Include all markdown formatting including code blocks
-                - Do not truncate or abbreviate any content
-                - No placeholders or TODO items"""
+                IMPORTANT RULES:
+                1. All imports must be relative to project root (no 'src' prefix)
+                2. Each file must start with FILE: marker
+                3. Content must be between ###CONTENT_START### and ###CONTENT_END### markers
+                4. Include all necessary imports
+                5. No placeholders or TODO items
+                6. Follow the exact directory structure specified
+                7. Use proper relative imports between files
+                """
 
     def _build_core_files_prompt(self, context: GenerationContext) -> str:
         """Generates the core application files"""
