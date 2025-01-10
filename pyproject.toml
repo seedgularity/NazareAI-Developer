@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_developer_worker"
+version = "0.1.0"
+description = "AI-powered CLI tool for developer assistance"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+dependencies = [
+    "typer>=0.9.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.2",
+    "httpx>=0.24.1",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v"
+asyncio_default_fixture_loop_scope = "function"
+
+[project.scripts]
+ai-dev = "src.main:main"
