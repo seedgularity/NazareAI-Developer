@@ -457,7 +457,7 @@ class CodeGenerator:
             """,
 
             "nextjs": """
-            Essential files to include:
+            Minimum, but not limited to, essential files to include:
             1. pages/
                - index.tsx
                - _app.tsx
@@ -473,17 +473,93 @@ class CodeGenerator:
             IMPORTANT: All imports should be relative to the project root
             Example: import { Layout } from 'components/Layout'
             """,
-            # ... other project templates ...
+            "flask": """
+            Minimum, but not limited to, essential files to include:
+            1. requirements.txt with all dependencies
+            2. app.py or application factory
+            3. config.py for configuration management
+            4. templates/ directory for Jinja templates
+            5. static/ directory for assets
+            6. models/ directory for database models
+            7. routes/ directory for view functions
+            8. tests/ directory
+            9. README.md with setup instructions""",
+
+                "django": """
+            Minimum, but not limited to, essential files to include:
+            1. manage.py
+            2. requirements.txt
+            3. project/settings.py
+            4. project/urls.py
+            5. project/wsgi.py
+            6. apps/main/models.py
+            7. apps/main/views.py
+            8. apps/main/urls.py
+            9. templates/ directory
+            10. static/ directory
+            11. README.md with setup instructions""",
+
+                "smart-contract": """
+            Minimum, but not limited to, essential files to include:
+            1. contracts/ directory with Solidity files
+            2. package.json with development dependencies
+            3. hardhat.config.js/ts for network config
+            4. scripts/ directory for deployment
+            5. test/ directory for contract tests
+            6. .env.example for environment variables
+            7. README.md with setup instructions""",
+
+                "hardhat": """
+            Minimum, but not limited to, essential files to include:
+            1. package.json with Hardhat dependencies
+            2. hardhat.config.ts with network configuration
+            3. contracts/ directory for Solidity files
+            4. scripts/ directory for deployment
+            5. test/ directory for contract tests
+            6. tasks/ directory for custom tasks
+            7. .env.example for environment variables
+            8. README.md with setup instructions""",
+
+                "react": """
+            Minimum, but not limited to, essential files to include:
+            1. package.json with dependencies
+            2. tsconfig.json for TypeScript
+            3. src/App.tsx main component
+            4. src/index.tsx entry point
+            5. public/index.html
+            6. src/components/ directory
+            7. src/styles/ directory
+            8. README.md with setup instructions""",
+
+            "html": """
+            Minimum, but not limited to, essential files to include:
+            1. index.html         # Main entry point
+            2. css/
+               - styles.css       # Main stylesheet
+            3. js/
+               - main.js         # Main JavaScript file
+            4. assets/
+               - images/         # For image files
+               - fonts/          # For font files
+            5. pages/            # Additional HTML pages
+            6. README.md         # Documentation
+
+            IMPORTANT: 
+            1. Use relative paths for all resources
+            2. Follow HTML5 standards
+            3. Include proper meta tags
+            4. Ensure responsive design
+            5. Include favicon
+            """,
         }
 
         # Get template for the project type or use a generic one
         structure_template = project_templates.get(context.project_type, """
-            Essential files to include:
+            Minimum, but not limited to, essential files to include:
             1. Main source code directory
             2. Configuration files
-            3. Test directory
-            4. Documentation files
-            5. README.md with setup instructions
+            3. Documentation files
+            4. README.md with setup instructions
 
             IMPORTANT: All imports should be relative to the project root
             """)
@@ -524,6 +600,84 @@ class CodeGenerator:
                 3. Use clear function and variable names
                 4. Add appropriate error handling
                 5. Follow Python best practices
+                """,
+            
+            "nextjs": """
+                Create a focused Next.js implementation that matches the project requirements.
+                
+                Key points:
+                1. Use TypeScript for type safety
+                2. Implement proper component structure
+                3. Follow React/Next.js best practices
+                4. Include proper error boundaries
+                5. Use proper data fetching methods
+                6. Implement responsive design
+                7. Follow accessibility guidelines
+                """,
+
+            "react": """
+                Create a focused React implementation that matches the project requirements.
+                
+                Key points:
+                1. Use TypeScript for type safety
+                2. Follow component composition best practices
+                3. Implement proper state management
+                4. Use React hooks effectively
+                5. Include error boundaries
+                6. Follow accessibility guidelines
+                7. Optimize performance with proper memoization
+                """,
+
+            "flask": """
+                Create a focused Flask implementation that matches the project requirements.
+                
+                Key points:
+                1. Follow Flask application factory pattern
+                2. Implement proper error handling
+                3. Use Blueprint structure for routes
+                4. Include proper database models
+                5. Implement RESTful API best practices
+                6. Add proper request validation
+                7. Include security best practices
+                """,
+
+            "django": """
+                Create a focused Django implementation that matches the project requirements.
+                
+                Key points:
+                1. Follow Django project structure best practices
+                2. Implement proper models and migrations
+                3. Use class-based views where appropriate
+                4. Include proper form validation
+                5. Implement Django REST framework if needed
+                6. Follow security best practices
+                7. Use Django's built-in features effectively
+                """,
+
+            "smart-contract": """
+                Create a focused smart contract implementation that matches the project requirements.
+                
+                Key points:
+                1. Follow Solidity best practices
+                2. Implement proper security measures
+                3. Optimize for gas efficiency
+                4. Include comprehensive tests
+                5. Add proper access controls
+                6. Implement event emissions
+                7. Follow upgrade patterns if needed
+                """,
+
+            "html": """
+                Create a focused HTML/CSS implementation that matches the project requirements.
+                
+                Key points:
+                1. Use semantic HTML5 elements
+                2. Implement responsive design
+                3. Follow accessibility guidelines
+                4. Optimize for performance
+                5. Use modern CSS features appropriately
+                6. Ensure cross-browser compatibility
+                7. Follow progressive enhancement principles
                 """
         }
 
@@ -682,6 +836,8 @@ class CodeGenerator:
                 7. License (if applicable)
 
                 IMPORTANT:
+                - IT MUST HAVE ALL DETAILS FOR USER TO BE ABLE TO RUN THE PROJECT, INCLUDING ALL DEPENDENCIES, SETUP, AND INSTALLATION
+                - IT MUST INCLUDE ALL THE FILES THAT USER NEEDS TO CREATE, INCLUDING FORMAT AND STRUCTURE
                 - Include ONLY relevant sections
                 - NO placeholder content
                 - NO generic instructions that don't apply

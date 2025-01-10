@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime
 import json
+import asyncio
 
 from .base_provider import BaseProvider
 
@@ -85,61 +86,81 @@ class OpenRouterProvider(BaseProvider):
             # Get language-specific prompt additions
             language_prompt = self._get_language_prompt(language)
 
-            # Construct the system message
-            system_message = (
-                f"You are an expert {language} developer. Generate complete, production-ready code. "
-                f"Follow these rules:\n"
-                f"1. Use actual module names instead of placeholders like 'your_module'\n"
-                f"2. Generate complete file content - no truncation or placeholders\n"
-                f"3. Use proper imports between files\n"
-                f"4. Include full class/function implementations\n"
-                f"5. Follow {language} best practices and patterns\n"
-                f"{language_prompt}\n"
-                f"For each file, use exactly this format:\n"
-                f"filename.ext\n```\nComplete file content here\n```"
-            )
-
-            # Construct messages array
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
+            # Break down the generation into smaller, focused tasks
+            tasks = [
+                "1. Create the project structure and essential configuration files",
+                "2. Implement the core components and layouts",
+                "3. Create the main pages and routing",
+                "4. Add utility functions and helpers",
+                "5. Implement styling and assets"
             ]
 
-            # Add context if provided
-            if context:
-                context_str = "\nContext:\n" + "\n".join(
-                    f"{k}: {v}" for k, v in context.items()
+            full_response = []
+            
+            for task in tasks:
+                # Construct task-specific prompt
+                task_prompt = (
+                    f"You are an expert {language} developer. Generate production-ready code "
+                    f"for the following task: {task}\n\n"
+                    f"Original request: {prompt}\n\n"
+                    f"Follow these rules:\n"
+                    f"1. Use actual module names instead of placeholders\n"
+                    f"2. Generate complete file content - no truncation\n"
+                    f"3. Use proper imports between files\n"
+                    f"4. Include full implementations\n"
+                    f"5. Follow {language} best practices\n"
+                    f"{language_prompt}\n\n"
+                    f"For each file, use exactly this format:\n"
+                    f"FILE: filename.ext\n###CONTENT_START###\nComplete file content here\n###CONTENT_END###"
                 )
-                messages.append({
-                    "role": "system",
-                    "content": context_str
-                })
 
-            # Prepare request payload
-            payload = {
-                "model": self.default_model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
+                messages = [
+                    {"role": "system", "content": task_prompt},
+                    {"role": "user", "content": f"Generate code for: {task}"}
+                ]
 
-            # Make API request
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                    timeout=30.0
-                )
-                # This will raise an HTTPError for 4XX and 5XX responses
-                response.raise_for_status()
+                # Add context if provided
+                if context:
+                    context_str = "\nContext:\n" + "\n".join(
+                        f"{k}: {v}" for k, v in context.items()
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": context_str
+                    })
 
-                # Parse the response
-                result = response.json()
-                if "choices" not in result or not result["choices"]:
-                    raise httpx.HTTPError("Invalid response from OpenRouter API")
+                # Make API request
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self.headers,
+                        json={
+                            "model": self.default_model,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                        },
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    result = response.json()
 
-                return result["choices"][0]["message"]["content"]
+                    if "choices" not in result or not result["choices"]:
+                        raise httpx.HTTPError("Invalid response from OpenRouter API")
+
+                    current_response = result["choices"][0]["message"]["content"]
+                    full_response.append(current_response)
+
+            # Combine all responses
+            combined_response = "\n".join(full_response)
+
+            # Log the complete response
+            log_dir = Path("./logs")
+            log_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            (log_dir / f"complete_response_{timestamp}.txt").write_text(combined_response)
+
+            return combined_response
 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error during code generation: {e}")
