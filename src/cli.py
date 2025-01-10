@@ -647,9 +647,15 @@ def fix(
     path: str = typer.Argument(
         ...,
         help="Path to the project to fix"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed progress"
     )
 ):
-    """Fix common issues in the project automatically."""
+    """Fix issues in the project automatically."""
     try:
         project_dir = Path(path).absolute()
         if not project_dir.exists():
@@ -663,49 +669,35 @@ def fix(
         analyzer = None
         language = None
 
+        typer.echo("Detecting project type...")
+        
         # Check for Python project
         if (project_dir / "setup.py").exists() or (project_dir / "requirements.txt").exists():
             language = "python"
             from src.worker.analyzer.python import PythonAnalyzer
             analyzer = PythonAnalyzer(provider)
+            typer.echo("Detected Python project")
 
         # Check for JavaScript/TypeScript project
         elif (project_dir / "package.json").exists():
-            # Check if it's a Hardhat/Solidity project first
             with open(project_dir / "package.json") as f:
                 pkg_data = json.load(f)
                 if any(dep.startswith('hardhat') for dep in pkg_data.get("devDependencies", {}).keys()):
                     language = "solidity"
                     from src.worker.analyzer.solidity import SolidityAnalyzer
                     analyzer = SolidityAnalyzer(provider)
+                    typer.echo("Detected Solidity project")
                 else:
-                    # Check for TypeScript configuration
                     if (project_dir / "tsconfig.json").exists() or any(project_dir.glob("**/*.ts")):
                         language = "typescript"
                         from src.worker.analyzer.typescript import TypeScriptAnalyzer
                         analyzer = TypeScriptAnalyzer(provider)
+                        typer.echo("Detected TypeScript project")
                     else:
                         language = "javascript"
                         from src.worker.analyzer.javascript import JavaScriptAnalyzer
                         analyzer = JavaScriptAnalyzer(provider)
-
-        # Check for Solidity project (without package.json)
-        elif any(project_dir.glob("**/*.sol")):
-            language = "solidity"
-            from src.worker.analyzer.solidity import SolidityAnalyzer
-            analyzer = SolidityAnalyzer(provider)
-
-        # Check for style files
-        elif any(project_dir.glob("**/*.css")) or any(project_dir.glob("**/*.scss")):
-            language = "style"
-            from src.worker.analyzer.style import StyleAnalyzer
-            analyzer = StyleAnalyzer(provider)
-
-        # Check for Rust project
-        elif (project_dir / "Cargo.toml").exists():
-            language = "rust"
-            from src.worker.analyzer.rust import RustAnalyzer
-            analyzer = RustAnalyzer(provider)
+                        typer.echo("Detected JavaScript project")
 
         if not analyzer:
             typer.echo("Error: Could not determine project type")
@@ -716,26 +708,44 @@ def fix(
         asyncio.set_event_loop(loop)
 
         # Run analysis first to get issues
-        typer.echo(f"Analyzing {language} project...")
+        typer.echo(f"\nAnalyzing {language} project...")
         analysis_result = loop.run_until_complete(analyzer.analyze_project(project_dir))
 
         if not analysis_result.issues:
             typer.echo("No issues found to fix")
             return
 
+        # Display analysis results
+        typer.echo(f"\nFound {len(analysis_result.issues)} issues:")
+        for issue in analysis_result.issues:
+            file_path = issue.get('file', 'Unknown file')
+            line = issue.get('line', 'Unknown line')
+            message = issue.get('message', 'No description')
+            severity = issue.get('severity', 'info')
+            typer.echo(f"- [{severity.upper()}] {file_path}:{line} - {message}")
+
+        # Confirm before fixing
+        if not typer.confirm("\nDo you want to proceed with fixing these issues?"):
+            typer.echo("Fix cancelled")
+            return
+
         # Fix issues
-        typer.echo("Fixing issues...")
+        typer.echo("\nFixing issues...")
         fixed = loop.run_until_complete(analyzer.fix_issues(project_dir, analysis_result.issues))
 
         if fixed:
-            typer.echo("Successfully fixed some issues")
+            typer.echo("\nSuccessfully fixed some issues. Original files backed up with .bak extension")
+            if analysis_result.suggestions:
+                typer.echo("\nAdditional suggestions:")
+                for suggestion in analysis_result.suggestions:
+                    typer.echo(f"- {suggestion}")
         else:
-            typer.echo("No issues could be fixed automatically")
+            typer.echo("\nNo issues could be fixed automatically")
 
         loop.close()
 
     except Exception as e:
-        logger.exception(f"Error fixing project: {str(e)}")
+        logger.exception(f"Error fixing project: {e}")
         raise typer.Exit(1)
 
 def handle_fix(args):

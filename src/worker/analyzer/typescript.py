@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Set, Optional
 import re
+import json
 
 from .javascript import JavaScriptAnalyzer, JavaScriptAnalysisResult
 from ...llm.providers.base_provider import BaseProvider
@@ -56,72 +57,222 @@ class TypeScriptAnalyzer(JavaScriptAnalyzer):
     async def analyze_project(self, project_dir: Path) -> TypeScriptAnalysisResult:
         """Analyze entire TypeScript project"""
         try:
-            # Initialize result variables
-            all_issues = []
+            # First check project structure and dependencies
+            structure_issues = await self._check_project_structure(project_dir)
+            
+            # Get static analysis results
+            static_issues = []
             files_analyzed = []
-            total_score = 0
-            file_count = 0
-            type_coverage = 0.0
-            interface_issues = []
-
-            # Get base analysis from JavaScript analyzer
+            
+            # Analyze each TypeScript file
+            for file_path in await self.get_language_files(project_dir):
+                if "node_modules" not in str(file_path):
+                    try:
+                        file_result = await self.analyze_file(file_path)
+                        static_issues.extend(file_result.get("issues", []))
+                        files_analyzed.append(str(file_path))
+                    except Exception as e:
+                        self.logger.error(f"Error analyzing {file_path}: {e}")
+                        continue
+            
+            # Try to get LLM insights, but don't fail if it errors
             try:
-                js_result = await super().analyze_project(project_dir)
+                llm_insights = await self._get_llm_analysis(project_dir)
             except Exception as e:
-                self.logger.error(f"Base analysis failed: {e}")
-                # Create empty JavaScript result if base analysis fails
-                js_result = JavaScriptAnalysisResult(
-                    score=5.0,  # Default middle score
-                    issues=[],
-                    suggestions=[],
-                    files_analyzed=[],
-                    dependencies=set(),
-                    dev_dependencies=set(),
-                    type_issues=[]
-                )
-
-            # Additional TypeScript-specific analysis
-            try:
-                type_coverage = await self._calculate_type_coverage(project_dir)
-            except Exception as e:
-                self.logger.error(f"Type coverage calculation failed: {e}")
-                type_coverage = 0.0
-
-            try:
-                interface_issues = await self._check_interface_issues(project_dir)
-            except Exception as e:
-                self.logger.error(f"Interface analysis failed: {e}")
-                interface_issues = []
-
-            # Convert to TypeScript result
+                self.logger.warning(f"LLM analysis failed: {e}")
+                llm_insights = {}
+            
+            # Combine all issues
+            all_issues = static_issues + structure_issues
+            
             return TypeScriptAnalysisResult(
-                score=js_result.score,
-                issues=js_result.issues,
-                suggestions=js_result.suggestions,
-                files_analyzed=js_result.files_analyzed,
-                dependencies=js_result.dependencies,
-                dev_dependencies=js_result.dev_dependencies,
-                type_issues=js_result.type_issues,
-                type_coverage=type_coverage,
-                interface_issues=interface_issues,
-                llm_insights=js_result.llm_insights
+                score=self._calculate_score(all_issues),
+                issues=all_issues,
+                suggestions=self._generate_suggestions(all_issues),
+                files_analyzed=files_analyzed,
+                dependencies=self._get_dependencies(project_dir),
+                dev_dependencies=self._get_dev_dependencies(project_dir),
+                type_issues=[i for i in all_issues if i["code"].startswith("type-")],
+                type_coverage=await self._calculate_type_coverage(project_dir),
+                interface_issues=[i for i in all_issues if i["code"].startswith("interface-")],
+                llm_insights=llm_insights
             )
-
+            
         except Exception as e:
             self.logger.error(f"Error analyzing TypeScript project: {e}")
-            # Return a basic result instead of raising
-            return TypeScriptAnalysisResult(
-                score=5.0,
-                issues=[],
-                suggestions=["Unable to complete full analysis"],
-                files_analyzed=[],
-                dependencies=set(),
-                dev_dependencies=set(),
-                type_issues=[],
-                type_coverage=0.0,
-                interface_issues=[],
-                llm_insights={}
-            )
+            raise
+
+    async def _check_project_structure(self, project_dir: Path) -> List[Dict]:
+        """Check for missing files and configuration issues"""
+        try:
+            # First detect existing structure
+            existing_structure = {
+                "components": None,
+                "styles": None,
+                "pages": None,
+                "public": None,
+                "src": None
+            }
+
+            # Check if project uses src directory
+            src_dir = project_dir / "src"
+            uses_src = src_dir.exists() and any(src_dir.iterdir())
+
+            # Check existing component locations
+            if (project_dir / "components").exists():
+                existing_structure["components"] = "root"
+            elif uses_src and (src_dir / "components").exists():
+                existing_structure["components"] = "src"
+
+            # Check existing styles location
+            if (project_dir / "styles").exists():
+                existing_structure["styles"] = "root"
+            elif uses_src and (src_dir / "styles").exists():
+                existing_structure["styles"] = "src"
+
+            # Check existing pages location
+            if (project_dir / "pages").exists():
+                existing_structure["pages"] = "root"
+            elif uses_src and (src_dir / "pages").exists():
+                existing_structure["pages"] = "src"
+
+            issues = []
+            
+            # Check package.json
+            package_json = project_dir / "package.json"
+            if not package_json.exists():
+                issues.append({
+                    "code": "missing-package-json",
+                    "message": "Missing package.json file",
+                    "severity": "error",
+                    "file": str(package_json),
+                    "fix_type": "create",
+                    "fix_content": self._generate_package_json()
+                })
+            else:
+                with open(package_json) as f:
+                    pkg_data = json.load(f)
+                    # Check scripts
+                    if not pkg_data.get("scripts"):
+                        issues.append({
+                            "code": "missing-scripts",
+                            "message": "No scripts defined in package.json",
+                            "severity": "error",
+                            "file": str(package_json),
+                            "fix_type": "update",
+                            "fix_content": {"scripts": self._generate_default_scripts()}
+                        })
+                    # Check dependencies
+                    missing_deps = self._check_required_dependencies(pkg_data)
+                    if missing_deps:
+                        issues.append({
+                            "code": "missing-dependencies",
+                            "message": f"Missing required dependencies: {', '.join(missing_deps)}",
+                            "severity": "error",
+                            "file": str(package_json),
+                            "fix_type": "update",
+                            "fix_content": {"dependencies": {dep: "latest" for dep in missing_deps}}
+                        })
+
+            # Check tsconfig.json
+            tsconfig = project_dir / "tsconfig.json"
+            if not tsconfig.exists():
+                issues.append({
+                    "code": "missing-tsconfig",
+                    "message": "Missing tsconfig.json file",
+                    "severity": "error",
+                    "file": str(tsconfig),
+                    "fix_type": "create",
+                    "fix_content": self._generate_tsconfig()
+                })
+
+            # Create missing directories in the correct location
+            essential_dirs = ["components", "styles", "pages", "public"]
+            for dir_name in essential_dirs:
+                # Determine correct location based on existing structure
+                if existing_structure[dir_name] == "src":
+                    dir_path = src_dir / dir_name
+                elif existing_structure[dir_name] == "root":
+                    dir_path = project_dir / dir_name
+                else:
+                    # If no existing structure, prefer src if it exists
+                    dir_path = (src_dir if uses_src else project_dir) / dir_name
+
+                if not dir_path.exists():
+                    issues.append({
+                        "code": "missing-directory",
+                        "message": f"Missing {dir_name} directory",
+                        "severity": "warning",
+                        "file": str(dir_path),
+                        "fix_type": "create_dir"
+                    })
+
+            # Check for essential files in correct locations
+            essential_files = {}
+            
+            # Determine correct paths based on structure
+            if uses_src:
+                essential_files.update({
+                    "src/index.tsx": self._generate_index_tsx,
+                    "src/components/Layout.tsx": self._generate_layout_component,
+                    "src/styles/globals.css": self._generate_global_styles
+                })
+            else:
+                essential_files.update({
+                    "pages/index.tsx": self._generate_index_tsx,
+                    "components/Layout.tsx": self._generate_layout_component,
+                    "styles/globals.css": self._generate_global_styles
+                })
+
+            # Common files regardless of structure
+            essential_files.update({
+                ".gitignore": self._generate_gitignore,
+                "README.md": self._generate_readme,
+                ".env": self._generate_env,
+                "next.config.js": self._generate_next_config
+            })
+            
+            for file_name, generator in essential_files.items():
+                file_path = project_dir / file_name
+                if not file_path.exists():
+                    issues.append({
+                        "code": "missing-file",
+                        "message": f"Missing {file_name}",
+                        "severity": "warning",
+                        "file": str(file_path),
+                        "fix_type": "create",
+                        "fix_content": generator()
+                    })
+
+            return issues
+
+        except Exception as e:
+            self.logger.error(f"Error checking project structure: {e}")
+            return []
+
+    def _check_required_dependencies(self, pkg_data: Dict) -> List[str]:
+        """Check for missing required dependencies"""
+        required_deps = {
+            "react": "latest",
+            "react-dom": "latest",
+            "next": "latest",
+            "typescript": "latest",
+            "@types/react": "latest",
+            "@types/react-dom": "latest",
+            "@types/node": "latest"
+        }
+        
+        missing_deps = []
+        existing_deps = {
+            **pkg_data.get("dependencies", {}),
+            **pkg_data.get("devDependencies", {})
+        }
+        
+        for dep in required_deps:
+            if dep not in existing_deps:
+                missing_deps.append(dep)
+                
+        return missing_deps
 
     async def analyze_file(self, file_path: Path) -> Dict:
         """Analyze a single TypeScript file"""
@@ -133,8 +284,8 @@ class TypeScriptAnalyzer(JavaScriptAnalyzer):
             with open(file_path, 'r') as f:
                 content = f.read()
 
-            # Check for TypeScript-specific issues
-            ts_issues = self._check_typescript_specific_issues(content)
+            # Pass file_path to the check function
+            ts_issues = self._check_typescript_specific_issues(content, file_path)
             result["issues"].extend(ts_issues)
 
             # Adjust score based on TypeScript-specific issues
@@ -146,48 +297,52 @@ class TypeScriptAnalyzer(JavaScriptAnalyzer):
             self.logger.error(f"Error analyzing TypeScript file {file_path}: {e}")
             return {"score": 0, "issues": []}
 
-    def _check_typescript_specific_issues(self, content: str) -> List[Dict]:
+    def _check_typescript_specific_issues(self, content: str, file_path: Path) -> List[Dict]:
         """Check for TypeScript-specific issues"""
         issues = []
 
         try:
-            # Check for proper interface naming - updated regex
-            interface_matches = re.finditer(r'\binterface\s+(\w+)', content)
-            for match in interface_matches:
-                interface_name = match.group(1)
-                if not interface_name.startswith('I'):
+            # Split content into lines for line number tracking
+            lines = content.split('\n')
+            
+            # Check for proper interface naming
+            for i, line in enumerate(lines, 1):
+                interface_match = re.search(r'\binterface\s+(\w+)', line)
+                if interface_match:
+                    interface_name = interface_match.group(1)
+                    if not interface_name.startswith('I'):
+                        issues.append({
+                            "code": "interface-naming",
+                            "message": f"Interface {interface_name} should start with 'I'",
+                            "severity": "info",
+                            "file": str(file_path),
+                            "line": i
+                        })
+
+            # Check for type assertions
+            for i, line in enumerate(lines, 1):
+                if re.search(r'\bas\s+[A-Z]\w+', line):
                     issues.append({
-                        "code": "interface-naming",
-                        "message": f"Interface {interface_name} should start with 'I'",
-                        "severity": "info"
+                        "code": "type-assertion",
+                        "message": "Consider using type guards instead of type assertions",
+                        "severity": "warning",
+                        "file": str(file_path),
+                        "line": i
                     })
 
-            # Check for type assertions - updated regex
-            if re.search(r'\bas\s+[A-Z]\w+', content):
-                issues.append({
-                    "code": "type-assertion",
-                    "message": "Consider using type guards instead of type assertions",
-                    "severity": "warning"
-                })
-
-            # Check for proper enum usage - updated regex
-            enum_matches = re.finditer(r'\benum\s+(\w+)', content)
-            for match in enum_matches:
-                enum_name = match.group(1)
-                if not enum_name.endswith('Enum'):
-                    issues.append({
-                        "code": "enum-naming",
-                        "message": f"Enum {enum_name} should end with 'Enum'",
-                        "severity": "info"
-                    })
-
-            # Check for any usage in generics - updated regex
-            if re.search(r'<\s*any\s*>', content):
-                issues.append({
-                    "code": "no-any-generics",
-                    "message": "Avoid using 'any' in generic type parameters",
-                    "severity": "warning"
-                })
+            # Check for variable declarations
+            for i, line in enumerate(lines, 1):
+                var_match = re.search(r'\b(const|let|var)\s+(\w+)\s*(?:=|:)', line)
+                if var_match:
+                    var_name = var_match.group(2)
+                    if not re.search(r':\s*\w+', line):  # No type annotation
+                        issues.append({
+                            "code": "missing-type",
+                            "message": f"Variable {var_name} might be used before declaration",
+                            "severity": "error",
+                            "file": str(file_path),
+                            "line": i
+                        })
 
         except re.error as e:
             self.logger.error(f"Regex error in TypeScript analysis: {e}")
@@ -298,63 +453,328 @@ class TypeScriptAnalyzer(JavaScriptAnalyzer):
         return suggestions 
 
     async def fix_issues(self, project_dir: Path, issues: List[Dict]) -> bool:
-        """Fix TypeScript-specific issues"""
+        """Fix TypeScript-specific issues including project structure"""
         try:
             files_modified = False
-            issues_by_file = {}
             
-            # Group issues by file
+            # First handle structural issues
             for issue in issues:
-                file_path = issue.get('file')
-                if file_path:
-                    if file_path not in issues_by_file:
-                        issues_by_file[file_path] = []
-                    issues_by_file[file_path].append(issue)
-
-            for file_path, file_issues in issues_by_file.items():
-                try:
-                    with open(project_dir / file_path, 'r') as f:
-                        content = f.read()
+                if issue.get("fix_type") == "create":
+                    # Create new file
+                    file_path = Path(issue["file"])
+                    if not file_path.parent.exists():
+                        file_path.parent.mkdir(parents=True)
                     
-                    modified_content = content
-                    
-                    for issue in file_issues:
-                        if issue['code'] == 'interface-any':
-                            # Replace 'any' types with 'unknown'
-                            modified_content = re.sub(
-                                r':\s*any\b',
-                                r': unknown',
-                                modified_content
-                            )
+                    self.logger.info(f"Creating {file_path}")
+                    with open(file_path, 'w') as f:
+                        if isinstance(issue["fix_content"], dict):
+                            json.dump(issue["fix_content"], f, indent=2)
+                        else:
+                            f.write(issue["fix_content"])
+                    files_modified = True
+                
+                elif issue.get("fix_type") == "update":
+                    # Update existing file
+                    file_path = Path(issue["file"])
+                    if file_path.exists():
+                        with open(file_path) as f:
+                            content = json.load(f)
                         
-                        elif issue['code'] == 'type-assertion':
-                            # Replace type assertions with type guards
-                            modified_content = re.sub(
-                                r'as\s+([A-Z]\w+)',
-                                lambda m: f'/* TODO: Replace with type guard for {m.group(1)} */',
-                                modified_content
-                            )
+                        # Update content
+                        content.update(issue["fix_content"])
                         
-                        elif issue['code'] == 'no-any-generics':
-                            # Add TODO comment for generic type parameters
-                            modified_content = re.sub(
-                                r'<\s*any\s*>',
-                                '/* TODO: Specify concrete type */ <unknown>',
-                                modified_content
-                            )
-
-                    if modified_content != content:
-                        with open(project_dir / file_path, 'w') as f:
-                            f.write(modified_content)
+                        self.logger.info(f"Updating {file_path}")
+                        with open(file_path, 'w') as f:
+                            json.dump(content, f, indent=2)
                         files_modified = True
-                        self.logger.info(f"Fixed issues in {file_path}")
+                
+                elif issue.get("fix_type") == "create_dir":
+                    # Create directory
+                    dir_path = Path(issue["file"])
+                    if not dir_path.exists():
+                        self.logger.info(f"Creating directory {dir_path}")
+                        dir_path.mkdir(parents=True)
+                        files_modified = True
 
-                except Exception as e:
-                    self.logger.error(f"Error fixing issues in {file_path}: {e}")
-                    continue
-
-            return files_modified
+            # Then handle code issues
+            code_fixes = await super().fix_issues(project_dir, [i for i in issues if "fix_type" not in i])
+            
+            return files_modified or code_fixes
 
         except Exception as e:
             self.logger.error(f"Error fixing TypeScript issues: {e}")
-            return False 
+            return False
+
+    def _infer_type_from_assignment(self, line: str) -> Optional[str]:
+        """Try to infer TypeScript type from assignment value"""
+        # Check for string literal
+        if re.search(r'=\s*[\'"]', line):
+            return "string"
+        # Check for number
+        elif re.search(r'=\s*\d+', line):
+            return "number"
+        # Check for boolean
+        elif re.search(r'=\s*(true|false)\b', line):
+            return "boolean"
+        # Check for array
+        elif re.search(r'=\s*\[', line):
+            return "any[]"  # Could be more specific based on content
+        # Check for object
+        elif re.search(r'=\s*\{', line):
+            return "Record<string, any>"  # Could be more specific based on content
+        # Check for function
+        elif re.search(r'=\s*\([^)]*\)\s*=>', line):
+            return "Function"
+        return None
+
+    def _generate_type_guard(self, type_name: str) -> str:
+        """Generate a type guard function for the given type"""
+        return f"""
+function is{type_name}(value: any): value is {type_name} {{
+    // TODO: Implement type guard logic
+    return true;  // Replace with actual type checking
+}}
+""" 
+
+    def _generate_package_json(self) -> Dict:
+        """Generate default package.json content"""
+        return {
+            "name": "typescript-project",
+            "version": "0.1.0",
+            "private": True,
+            "scripts": self._generate_default_scripts(),
+            "dependencies": {
+                "react": "latest",
+                "react-dom": "latest",
+                "next": "latest"
+            },
+            "devDependencies": {
+                "typescript": "latest",
+                "@types/react": "latest",
+                "@types/react-dom": "latest",
+                "@types/node": "latest"
+            }
+        }
+
+    def _generate_default_scripts(self) -> Dict:
+        """Generate default npm scripts"""
+        return {
+            "dev": "next dev",
+            "build": "next build",
+            "start": "next start",
+            "lint": "next lint",
+            "type-check": "tsc --noEmit"
+        }
+
+    def _generate_tsconfig(self) -> Dict:
+        """Generate default tsconfig.json content"""
+        return {
+            "compilerOptions": {
+                "target": "es5",
+                "lib": ["dom", "dom.iterable", "esnext"],
+                "allowJs": True,
+                "skipLibCheck": True,
+                "strict": True,
+                "forceConsistentCasingInFileNames": True,
+                "noEmit": True,
+                "esModuleInterop": True,
+                "module": "esnext",
+                "moduleResolution": "node",
+                "resolveJsonModule": True,
+                "isolatedModules": True,
+                "jsx": "preserve",
+                "incremental": True
+            },
+            "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+            "exclude": ["node_modules"]
+        } 
+
+    def _generate_index_tsx(self) -> str:
+        """Generate default index.tsx content"""
+        return '''import React from 'react';
+import type { NextPage } from 'next';
+
+const Home: NextPage = () => {
+  return (
+    <div>
+      <h1>Welcome to Next.js!</h1>
+    </div>
+  );
+};
+
+export default Home;
+'''
+
+    def _generate_gitignore(self) -> str:
+        """Generate default .gitignore content"""
+        return '''# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+'''
+
+    def _generate_readme(self) -> str:
+        """Generate default README.md content"""
+        return '''# Next.js TypeScript Project
+
+This is a [Next.js](https://nextjs.org/) project bootstrapped with TypeScript.
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+'''
+
+    def _generate_env(self) -> str:
+        """Generate default .env content"""
+        return '''# Environment variables
+NEXT_PUBLIC_API_URL=http://localhost:3000/api
+'''
+
+    def _generate_next_config(self) -> str:
+        """Generate default next.config.js content"""
+        return '''/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+  swcMinify: true,
+}
+
+module.exports = nextConfig
+''' 
+
+    def _generate_layout_component(self) -> str:
+        """Generate default Layout component"""
+        return '''import React from 'react';
+import styles from '../styles/Layout.module.css';  // Path will be adjusted based on structure
+
+interface LayoutProps {
+    children: React.ReactNode;
+}
+
+const Layout: React.FC<LayoutProps> = ({ children }) => {
+    return (
+        <div className={styles.container}>
+            <main>{children}</main>
+        </div>
+    );
+};
+
+export default Layout;
+''' 
+
+    def _get_dependencies(self, project_dir: Path) -> Set[str]:
+        """Get project dependencies from package.json"""
+        try:
+            package_json = project_dir / "package.json"
+            if package_json.exists():
+                with open(package_json) as f:
+                    pkg_data = json.load(f)
+                    return set(pkg_data.get("dependencies", {}).keys())
+            return set()
+        except Exception as e:
+            self.logger.error(f"Error getting dependencies: {e}")
+            return set()
+
+    def _get_dev_dependencies(self, project_dir: Path) -> Set[str]:
+        """Get project dev dependencies from package.json"""
+        try:
+            package_json = project_dir / "package.json"
+            if package_json.exists():
+                with open(package_json) as f:
+                    pkg_data = json.load(f)
+                    return set(pkg_data.get("devDependencies", {}).keys())
+            return set()
+        except Exception as e:
+            self.logger.error(f"Error getting dev dependencies: {e}")
+            return set()
+
+    def _generate_global_styles(self) -> str:
+        """Generate default global styles"""
+        return '''/* Global styles */
+:root {
+  --primary-color: #0070f3;
+  --background-color: #ffffff;
+  --text-color: #000000;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
+    Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+'''
+
+    async def _get_llm_analysis(self, project_dir: Path) -> Dict:
+        """Get LLM analysis for the entire project"""
+        try:
+            # Get all TypeScript files
+            files = []
+            for ext in self.get_file_extensions():
+                files.extend(project_dir.glob(f"**/*{ext}"))
+
+            # Combine content for analysis
+            combined_content = ""
+            for file in files:
+                if "node_modules" not in str(file):
+                    try:
+                        with open(file) as f:
+                            combined_content += f"\n\n// {file.name}\n{f.read()}"
+                    except Exception as e:
+                        self.logger.error(f"Error reading {file}: {e}")
+
+            # Get LLM analysis
+            if combined_content:
+                return await self.primary_llm.analyze_code(
+                    combined_content,
+                    "typescript",
+                    {"context": str(project_dir)}
+                )
+            return {}
+
+        except Exception as e:
+            self.logger.error(f"Error getting LLM analysis: {e}")
+            return {} 

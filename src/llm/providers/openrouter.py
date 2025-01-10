@@ -6,6 +6,7 @@ from loguru import logger
 from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime
+import json
 
 from .base_provider import BaseProvider
 
@@ -147,14 +148,9 @@ class OpenRouterProvider(BaseProvider):
             logger.error(f"Code generation failed: {e}")
             raise httpx.HTTPError(f"Error during code generation: {str(e)}")
 
-    async def analyze_code(
-            self,
-            code: str,
-            language: str,
-            context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    async def analyze_code(self, content: str, language: str, context: Dict = None) -> Dict:
         """Analyze code using OpenRouter."""
-        self._validate_prompt(code)
+        self._validate_prompt(content)
         self._validate_language(language)
 
         try:
@@ -168,13 +164,13 @@ class OpenRouterProvider(BaseProvider):
 
             messages = [
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": f"Please analyze this code:\n\n{code}"}
+                {"role": "user", "content": f"Please analyze this code:\n\n{content}"}
             ]
 
             if context:
                 messages.append({
                     "role": "system",
-                    "content": f"Additional context:\n{context}"
+                    "content": f"Additional context:\n{json.dumps(context)}"
                 })
 
             payload = {
@@ -207,7 +203,8 @@ class OpenRouterProvider(BaseProvider):
 
         except Exception as e:
             logger.error(f"Code analysis failed: {e}")
-            raise
+            # Return empty dict instead of raising to allow analysis to continue
+            return {}
 
     async def analyze_request(self, prompt: str) -> str:
         """Generate text response for analysis and recommendations."""

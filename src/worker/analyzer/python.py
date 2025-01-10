@@ -195,15 +195,16 @@ class PythonAnalyzer(BaseAnalyzer):
         """Fix identified issues using both static and LLM-powered solutions."""
         try:
             fixed_count = 0
-
+            
             # Group issues by file for efficiency
             issues_by_file = {}
             for issue in issues:
                 file_path = Path(issue.get('file', ''))
                 if not file_path.is_absolute():
                     file_path = project_dir / file_path
-
+                    
                 if not file_path.exists():
+                    self.logger.warning(f"File not found: {file_path}")
                     continue
 
                 if str(file_path) not in issues_by_file:
@@ -213,19 +214,39 @@ class PythonAnalyzer(BaseAnalyzer):
             # Process each file's issues
             for file_path_str, file_issues in issues_by_file.items():
                 file_path = Path(file_path_str)
+                self.logger.info(f"\nProcessing {file_path.relative_to(project_dir)}")
+                
+                # Create backup
+                backup_path = file_path.with_suffix(file_path.suffix + '.bak')
+                self.logger.info(f"Creating backup at {backup_path}")
+                import shutil
+                shutil.copy2(file_path, backup_path)
 
                 # First try static fixes
                 for issue in file_issues:
+                    self.logger.info(f"Attempting to fix: {issue['message']}")
+                    
                     if issue["code"] in ["missing-docstring", "trailing-whitespace", "missing-final-newline"]:
                         if await self._fix_simple_issue(file_path, issue):
+                            self.logger.info("✓ Fixed simple issue")
                             fixed_count += 1
+                        else:
+                            self.logger.info("✗ Could not fix simple issue")
+                            
                     elif issue["code"] in ["unused-import", "wrong-import-order"]:
                         if await self._fix_import_issue(file_path, issue):
+                            self.logger.info("✓ Fixed import issue")
                             fixed_count += 1
+                        else:
+                            self.logger.info("✗ Could not fix import issue")
+                            
                     elif issue["code"].startswith("llm-") or issue.get("severity") in ["high", "medium"]:
                         # Use LLM for complex issues or those identified by LLM
                         if await self._apply_llm_fix(file_path, issue):
+                            self.logger.info("✓ Applied LLM fix")
                             fixed_count += 1
+                        else:
+                            self.logger.info("✗ Could not apply LLM fix")
 
             return fixed_count > 0
 
